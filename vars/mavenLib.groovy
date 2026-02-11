@@ -1,31 +1,18 @@
 def call(Map cfg = [:]) {
   echo "[mavenLib] start"
 
-  // -------------------------
-  // Backward compatible mode
-  // -------------------------
+  // simple mode support (your existing)
   if (cfg.goal || cfg.options) {
     def goal = cfg.goal ?: "test"
     def options = cfg.options ?: "-U"
-
-    echo "[mavenLib] mode=simple"
-    echo "[mavenLib] goal=${goal}"
-    echo "[mavenLib] options=${options}"
-
     sh "mvn -version"
     sh "mvn ${options} clean ${goal}"
-
     echo "[mavenLib] end"
     return
   }
 
-  // -------------------------
-  // Company recipe mode
-  // -------------------------
-  echo "[mavenLib] mode=company-recipe"
-
+  // company mode
   def branch = env.BRANCH_NAME ?: "local"
-
   def branchType =
     (branch == "develop") ? "develop" :
     (branch.startsWith("release/") || branch.startsWith("release-") || branch == "release") ? "release" :
@@ -41,29 +28,39 @@ def call(Map cfg = [:]) {
   def settingsXml = cfg.settingsXml
   def settingsArg = settingsXml ? "-s ${settingsXml}" : ""
 
-  echo "[mavenLib] branch=${branch}"
-  echo "[mavenLib] branchType=${branchType}"
-  echo "[mavenLib] goals=clean:${cleanGoal}, main:${mainGoal}"
-  echo "[mavenLib] options=${options}"
-  echo "[mavenLib] settingsXml=${settingsXml ?: 'none'}"
-  echo "[mavenLib] gitUser=${cfg.gitUser ?: 'none'} gitEmail=${cfg.gitEmail ?: 'none'}"
+  echo "[mavenLib] branch=${branch} type=${branchType}"
+  echo "[mavenLib] mvn: ${cleanGoal} ${mainGoal}"
   echo "[mavenLib] sonarUrl=${cfg.sonarUrl ?: 'disabled'}"
-  echo "[mavenLib] secretsScan=${cfg.secretsScan}"
-  echo "[mavenLib] scaScan=${cfg.scaScan ? 'enabled' : 'disabled'}"
 
-  // simulate scans (so you can "feel" them)
-  if (cfg.secretsScan) echo "[mavenLib] secrets scan (simulate) -> OK"
-  if (cfg.scaScan)     echo "[mavenLib] SCA scan (simulate) -> OK"
-
-  // actual build
+  // Build
   sh "mvn -version"
   sh "mvn ${options} ${settingsArg} ${cleanGoal} ${mainGoal}"
 
-  // sonar (simulate for now)
+  // Sonar scan + quality gate
   if (cfg.sonarUrl) {
-    echo "[mavenLib] sonar enabled (simulate) -> would run: mvn sonar:sonar -Dsonar.host.url=${cfg.sonarUrl}"
-    // later, when you have sonar up, uncomment:
-    // sh "mvn ${options} ${settingsArg} sonar:sonar -Dsonar.host.url=${cfg.sonarUrl}"
+    def sonarServerName = "sonarqube-local"   // must match Jenkins system config
+
+    withSonarQubeEnv(sonarServerName) {
+      def projectKey = env.JOB_NAME.replaceAll('/', ':')
+      def projectName = env.JOB_NAME
+
+      echo "[mavenLib] Sonar scan start key=${projectKey}"
+      sh """
+        mvn ${options} ${settingsArg} sonar:sonar \
+          -Dsonar.projectKey=${projectKey} \
+          -Dsonar.projectName=${projectName}
+      """
+      echo "[mavenLib] Sonar scan end"
+    }
+
+    timeout(time: 10, unit: 'MINUTES') {
+      def qg = waitForQualityGate()
+      echo "[mavenLib] Quality Gate: ${qg.status}"
+
+      if (cfg.sonarScanOverrides?.failOnQualityGate && qg.status != "OK") {
+        error("[mavenLib] Quality Gate failed: ${qg.status}")
+      }
+    }
   } else {
     echo "[mavenLib] sonar skipped"
   }
